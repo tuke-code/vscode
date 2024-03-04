@@ -58,11 +58,13 @@ const compilations = [
 	'media-preview/tsconfig.json',
 	'merge-conflict/tsconfig.json',
 	'microsoft-authentication/tsconfig.json',
+	'notebook-renderers/tsconfig.json',
 	'npm/tsconfig.json',
 	'php-language-features/tsconfig.json',
 	'search-result/tsconfig.json',
 	'references-view/tsconfig.json',
 	'simple-browser/tsconfig.json',
+	'tunnel-forwarding/tsconfig.json',
 	'typescript-language-features/test-workspace/tsconfig.json',
 	'typescript-language-features/web/tsconfig.json',
 	'typescript-language-features/tsconfig.json',
@@ -132,7 +134,8 @@ const tasks = compilations.map(function (tsconfigFile) {
 					sourceMappingURL: !build ? null : f => `${baseUrl}/${f.relative}.map`,
 					addComment: !!build,
 					includeContent: !!build,
-					sourceRoot: '../src'
+					// note: trailing slash is important, else the source URLs in V8's file coverage are incorrect
+					sourceRoot: '../src/',
 				}))
 				.pipe(tsFilter.restore)
 				.pipe(build ? nlsDev.bundleMetaDataFiles(headerId, headerOut) : es.through())
@@ -237,11 +240,21 @@ const cleanExtensionsBuildTask = task.define('clean-extensions-build', util.rimr
 const compileExtensionsBuildTask = task.define('compile-extensions-build', task.series(
 	cleanExtensionsBuildTask,
 	task.define('bundle-marketplace-extensions-build', () => ext.packageMarketplaceExtensionsStream(false).pipe(gulp.dest('.build'))),
-	task.define('bundle-extensions-build', () => ext.packageLocalExtensionsStream(false).pipe(gulp.dest('.build'))),
+	task.define('bundle-extensions-build', () => ext.packageLocalExtensionsStream(false, false).pipe(gulp.dest('.build'))),
 ));
 
 gulp.task(compileExtensionsBuildTask);
 gulp.task(task.define('extensions-ci', task.series(compileExtensionsBuildTask, compileExtensionMediaBuildTask)));
+
+const compileExtensionsBuildPullRequestTask = task.define('compile-extensions-build-pr', task.series(
+	cleanExtensionsBuildTask,
+	task.define('bundle-marketplace-extensions-build', () => ext.packageMarketplaceExtensionsStream(false).pipe(gulp.dest('.build'))),
+	task.define('bundle-extensions-build-pr', () => ext.packageLocalExtensionsStream(false, true).pipe(gulp.dest('.build'))),
+));
+
+gulp.task(compileExtensionsBuildPullRequestTask);
+gulp.task(task.define('extensions-ci-pr', task.series(compileExtensionsBuildPullRequestTask, compileExtensionMediaBuildTask)));
+
 
 exports.compileExtensionsBuildTask = compileExtensionsBuildTask;
 

@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { isNonEmptyArray } from 'vs/base/common/arrays';
+import { VSBuffer } from 'vs/base/common/buffer';
 import { CancellationToken } from 'vs/base/common/cancellation';
 import { Event } from 'vs/base/common/event';
 import { parse } from 'vs/base/common/json';
@@ -18,10 +19,10 @@ import { ILogService } from 'vs/platform/log/common/log';
 import { IStorageService } from 'vs/platform/storage/common/storage';
 import { ITelemetryService } from 'vs/platform/telemetry/common/telemetry';
 import { IUriIdentityService } from 'vs/platform/uriIdentity/common/uriIdentity';
-import { IUserDataProfile } from 'vs/platform/userDataProfile/common/userDataProfile';
-import { AbstractJsonFileSynchroniser, IAcceptResult, IFileResourcePreview, IMergeResult } from 'vs/platform/userDataSync/common/abstractSynchronizer';
+import { IUserDataProfile, IUserDataProfilesService } from 'vs/platform/userDataProfile/common/userDataProfile';
+import { AbstractInitializer, AbstractJsonFileSynchroniser, IAcceptResult, IFileResourcePreview, IMergeResult } from 'vs/platform/userDataSync/common/abstractSynchronizer';
 import { merge } from 'vs/platform/userDataSync/common/keybindingsMerge';
-import { Change, IRemoteUserData, IUserDataSyncBackupStoreService, IUserDataSyncConfiguration, IUserDataSynchroniser, IUserDataSyncLogService, IUserDataSyncEnablementService, IUserDataSyncStoreService, IUserDataSyncUtilService, SyncResource, UserDataSyncError, UserDataSyncErrorCode, USER_DATA_SYNC_SCHEME, CONFIG_SYNC_KEYBINDINGS_PER_PLATFORM } from 'vs/platform/userDataSync/common/userDataSync';
+import { Change, IRemoteUserData, IUserDataSyncLocalStoreService, IUserDataSyncConfiguration, IUserDataSynchroniser, IUserDataSyncLogService, IUserDataSyncEnablementService, IUserDataSyncStoreService, IUserDataSyncUtilService, SyncResource, UserDataSyncError, UserDataSyncErrorCode, USER_DATA_SYNC_SCHEME, CONFIG_SYNC_KEYBINDINGS_PER_PLATFORM } from 'vs/platform/userDataSync/common/userDataSync';
 
 interface ISyncContent {
 	mac?: string;
@@ -72,7 +73,7 @@ export class KeybindingsSynchroniser extends AbstractJsonFileSynchroniser implem
 		profile: IUserDataProfile,
 		collection: string | undefined,
 		@IUserDataSyncStoreService userDataSyncStoreService: IUserDataSyncStoreService,
-		@IUserDataSyncBackupStoreService userDataSyncBackupStoreService: IUserDataSyncBackupStoreService,
+		@IUserDataSyncLocalStoreService userDataSyncLocalStoreService: IUserDataSyncLocalStoreService,
 		@IUserDataSyncLogService logService: IUserDataSyncLogService,
 		@IConfigurationService configurationService: IConfigurationService,
 		@IUserDataSyncEnablementService userDataSyncEnablementService: IUserDataSyncEnablementService,
@@ -83,7 +84,7 @@ export class KeybindingsSynchroniser extends AbstractJsonFileSynchroniser implem
 		@ITelemetryService telemetryService: ITelemetryService,
 		@IUriIdentityService uriIdentityService: IUriIdentityService,
 	) {
-		super(profile.keybindingsResource, { syncResource: SyncResource.Keybindings, profile }, collection, fileService, environmentService, storageService, userDataSyncStoreService, userDataSyncBackupStoreService, userDataSyncEnablementService, telemetryService, logService, userDataSyncUtilService, configurationService, uriIdentityService);
+		super(profile.keybindingsResource, { syncResource: SyncResource.Keybindings, profile }, collection, fileService, environmentService, storageService, userDataSyncStoreService, userDataSyncLocalStoreService, userDataSyncEnablementService, telemetryService, logService, userDataSyncUtilService, configurationService, uriIdentityService);
 		this._register(Event.filter(configurationService.onDidChangeConfiguration, e => e.affectsConfiguration('settingsSync.keybindingsPerPlatform'))(() => this.triggerLocalChange()));
 	}
 
@@ -333,6 +334,58 @@ export class KeybindingsSynchroniser extends AbstractJsonFileSynchroniser implem
 
 	private syncKeybindingsPerPlatform(): boolean {
 		return !!this.configurationService.getValue(CONFIG_SYNC_KEYBINDINGS_PER_PLATFORM);
+	}
+
+}
+
+export class KeybindingsInitializer extends AbstractInitializer {
+
+	constructor(
+		@IFileService fileService: IFileService,
+		@IUserDataProfilesService userDataProfilesService: IUserDataProfilesService,
+		@IEnvironmentService environmentService: IEnvironmentService,
+		@IUserDataSyncLogService logService: IUserDataSyncLogService,
+		@IStorageService storageService: IStorageService,
+		@IUriIdentityService uriIdentityService: IUriIdentityService,
+	) {
+		super(SyncResource.Keybindings, userDataProfilesService, environmentService, logService, fileService, storageService, uriIdentityService);
+	}
+
+	protected async doInitialize(remoteUserData: IRemoteUserData): Promise<void> {
+		const keybindingsContent = remoteUserData.syncData ? this.getKeybindingsContentFromSyncContent(remoteUserData.syncData.content) : null;
+		if (!keybindingsContent) {
+			this.logService.info('Skipping initializing keybindings because remote keybindings does not exist.');
+			return;
+		}
+
+		const isEmpty = await this.isEmpty();
+		if (!isEmpty) {
+			this.logService.info('Skipping initializing keybindings because local keybindings exist.');
+			return;
+		}
+
+		await this.fileService.writeFile(this.userDataProfilesService.defaultProfile.keybindingsResource, VSBuffer.fromString(keybindingsContent));
+
+		await this.updateLastSyncUserData(remoteUserData);
+	}
+
+	private async isEmpty(): Promise<boolean> {
+		try {
+			const fileContent = await this.fileService.readFile(this.userDataProfilesService.defaultProfile.settingsResource);
+			const keybindings = parse(fileContent.value.toString());
+			return !isNonEmptyArray(keybindings);
+		} catch (error) {
+			return (<FileOperationError>error).fileOperationResult === FileOperationResult.FILE_NOT_FOUND;
+		}
+	}
+
+	private getKeybindingsContentFromSyncContent(syncContent: string): string | null {
+		try {
+			return getKeybindingsContentFromSyncContent(syncContent, true, this.logService);
+		} catch (e) {
+			this.logService.error(e);
+			return null;
+		}
 	}
 
 }

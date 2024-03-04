@@ -29,57 +29,22 @@ function MODEL_ID(resource: URI): string {
 	return resource.toString();
 }
 
-function computeModelSha1(model: ITextModel): string {
-	// compute the sha1
-	const shaComputer = new StringSHA1();
-	const snapshot = model.createSnapshot();
-	let text: string | null;
-	while ((text = snapshot.read())) {
-		shaComputer.update(text);
-	}
-	return shaComputer.digest();
-}
-
-
 class ModelData implements IDisposable {
-	public readonly model: TextModel;
-
-	private _languageSelection: ILanguageSelection | null;
-	private _languageSelectionListener: IDisposable | null;
 
 	private readonly _modelEventListeners = new DisposableStore();
 
 	constructor(
-		model: TextModel,
+		public readonly model: TextModel,
 		onWillDispose: (model: ITextModel) => void,
 		onDidChangeLanguage: (model: ITextModel, e: IModelLanguageChangedEvent) => void
 	) {
 		this.model = model;
-
-		this._languageSelection = null;
-		this._languageSelectionListener = null;
-
 		this._modelEventListeners.add(model.onWillDispose(() => onWillDispose(model)));
 		this._modelEventListeners.add(model.onDidChangeLanguage((e) => onDidChangeLanguage(model, e)));
 	}
 
-	private _disposeLanguageSelection(): void {
-		if (this._languageSelectionListener) {
-			this._languageSelectionListener.dispose();
-			this._languageSelectionListener = null;
-		}
-	}
-
 	public dispose(): void {
 		this._modelEventListeners.dispose();
-		this._disposeLanguageSelection();
-	}
-
-	public setLanguage(languageSelection: ILanguageSelection, source?: string): void {
-		this._disposeLanguageSelection();
-		this._languageSelection = languageSelection;
-		this._languageSelectionListener = this._languageSelection.onDidChange(() => this.model.setMode(languageSelection.languageId, source));
-		this.model.setMode(languageSelection.languageId, source);
 	}
 }
 
@@ -242,7 +207,8 @@ export class ModelService extends Disposable implements IModelService {
 		return true;
 	}
 
-	public getCreationOptions(language: string, resource: URI | undefined, isForSimpleWidget: boolean): ITextModelCreationOptions {
+	public getCreationOptions(languageIdOrSelection: string | ILanguageSelection, resource: URI | undefined, isForSimpleWidget: boolean): ITextModelCreationOptions {
+		const language = (typeof languageIdOrSelection === 'string' ? languageIdOrSelection : languageIdOrSelection.languageId);
 		let creationOptions = this._modelCreationOptionsByLanguageAndResource[language + resource];
 		if (!creationOptions) {
 			const editor = this._configurationService.getValue<IRawEditorConfig>('editor', { overrideIdentifier: language, resource });
@@ -345,12 +311,12 @@ export class ModelService extends Disposable implements IModelService {
 		}
 	}
 
-	private _createModelData(value: string | ITextBufferFactory, languageId: string, resource: URI | undefined, isForSimpleWidget: boolean): ModelData {
+	private _createModelData(value: string | ITextBufferFactory, languageIdOrSelection: string | ILanguageSelection, resource: URI | undefined, isForSimpleWidget: boolean): ModelData {
 		// create & save the model
-		const options = this.getCreationOptions(languageId, resource, isForSimpleWidget);
+		const options = this.getCreationOptions(languageIdOrSelection, resource, isForSimpleWidget);
 		const model: TextModel = new TextModel(
 			value,
-			languageId,
+			languageIdOrSelection,
 			options,
 			resource,
 			this._undoRedoService,
@@ -360,7 +326,12 @@ export class ModelService extends Disposable implements IModelService {
 		if (resource && this._disposedModels.has(MODEL_ID(resource))) {
 			const disposedModelData = this._removeDisposedModel(resource)!;
 			const elements = this._undoRedoService.getElements(resource);
-			const sha1IsEqual = (computeModelSha1(model) === disposedModelData.sha1);
+			const sha1Computer = this._getSHA1Computer();
+			const sha1IsEqual = (
+				sha1Computer.canComputeSHA1(model)
+					? sha1Computer.computeSHA1(model) === disposedModelData.sha1
+					: false
+			);
 			if (sha1IsEqual || disposedModelData.sharesUndoRedoStack) {
 				for (const element of elements.past) {
 					if (isEditStackElement(element) && element.matchesResource(resource)) {
@@ -478,8 +449,7 @@ export class ModelService extends Disposable implements IModelService {
 		let modelData: ModelData;
 
 		if (languageSelection) {
-			modelData = this._createModelData(value, languageSelection.languageId, resource, isForSimpleWidget);
-			this.setMode(modelData.model, languageSelection);
+			modelData = this._createModelData(value, languageSelection, resource, isForSimpleWidget);
 		} else {
 			modelData = this._createModelData(value, PLAINTEXT_LANGUAGE_ID, resource, isForSimpleWidget);
 		}
@@ -487,17 +457,6 @@ export class ModelService extends Disposable implements IModelService {
 		this._onModelAdded.fire(modelData.model);
 
 		return modelData.model;
-	}
-
-	public setMode(model: ITextModel, languageSelection: ILanguageSelection, source?: string): void {
-		if (!languageSelection) {
-			return;
-		}
-		const modelData = this._models[MODEL_ID(model.uri)];
-		if (!modelData) {
-			return;
-		}
-		modelData.setLanguage(languageSelection, source);
 	}
 
 	public destroyModel(resource: URI): void {
@@ -570,6 +529,7 @@ export class ModelService extends Disposable implements IModelService {
 		}
 
 		const maxMemory = ModelService.MAX_MEMORY_FOR_CLOSED_FILES_UNDO_STACK;
+		const sha1Computer = this._getSHA1Computer();
 		if (!maintainUndoRedoStack) {
 			if (!sharesUndoRedoStack) {
 				const initialUndoRedoSnapshot = modelData.model.getInitialUndoRedoSnapshot();
@@ -577,8 +537,8 @@ export class ModelService extends Disposable implements IModelService {
 					this._undoRedoService.restoreSnapshot(initialUndoRedoSnapshot);
 				}
 			}
-		} else if (!sharesUndoRedoStack && heapSize > maxMemory) {
-			// the undo stack for this file would never fit in the configured memory, so don't bother with it.
+		} else if (!sharesUndoRedoStack && (heapSize > maxMemory || !sha1Computer.canComputeSHA1(model))) {
+			// the undo stack for this file would never fit in the configured memory or the file is very large, so don't bother with it.
 			const initialUndoRedoSnapshot = modelData.model.getInitialUndoRedoSnapshot();
 			if (initialUndoRedoSnapshot !== null) {
 				this._undoRedoService.restoreSnapshot(initialUndoRedoSnapshot);
@@ -587,7 +547,7 @@ export class ModelService extends Disposable implements IModelService {
 			this._ensureDisposedModelsHeapSize(maxMemory - heapSize);
 			// We only invalidate the elements, but they remain in the undo-redo service.
 			this._undoRedoService.setElementsValidFlag(model.uri, false, (element) => (isEditStackElement(element) && element.matchesResource(model.uri)));
-			this._insertDisposedModel(new DisposedModelInfo(model.uri, modelData.model.getInitialUndoRedoSnapshot(), Date.now(), sharesUndoRedoStack, heapSize, computeModelSha1(model), model.getVersionId(), model.getAlternativeVersionId()));
+			this._insertDisposedModel(new DisposedModelInfo(model.uri, modelData.model.getInitialUndoRedoSnapshot(), Date.now(), sharesUndoRedoStack, heapSize, sha1Computer.computeSHA1(model), model.getVersionId(), model.getAlternativeVersionId()));
 		}
 
 		delete this._models[modelId];
@@ -606,5 +566,34 @@ export class ModelService extends Disposable implements IModelService {
 		const newOptions = this.getCreationOptions(newLanguageId, model.uri, model.isForSimpleWidget);
 		ModelService._setModelOptionsForModel(model, newOptions, oldOptions);
 		this._onModelModeChanged.fire({ model, oldLanguageId: oldLanguageId });
+	}
+
+	protected _getSHA1Computer(): ITextModelSHA1Computer {
+		return new DefaultModelSHA1Computer();
+	}
+}
+
+export interface ITextModelSHA1Computer {
+	canComputeSHA1(model: ITextModel): boolean;
+	computeSHA1(model: ITextModel): string;
+}
+
+export class DefaultModelSHA1Computer implements ITextModelSHA1Computer {
+
+	public static MAX_MODEL_SIZE = 10 * 1024 * 1024; // takes 200ms to compute a sha1 on a 10MB model on a new machine
+
+	canComputeSHA1(model: ITextModel): boolean {
+		return (model.getValueLength() <= DefaultModelSHA1Computer.MAX_MODEL_SIZE);
+	}
+
+	computeSHA1(model: ITextModel): string {
+		// compute the sha1
+		const shaComputer = new StringSHA1();
+		const snapshot = model.createSnapshot();
+		let text: string | null;
+		while ((text = snapshot.read())) {
+			shaComputer.update(text);
+		}
+		return shaComputer.digest();
 	}
 }

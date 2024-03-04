@@ -10,7 +10,7 @@ import { Emitter, Event } from 'vs/base/common/event';
 import { isObject, assertIsDefined } from 'vs/base/common/types';
 import { MutableDisposable } from 'vs/base/common/lifecycle';
 import { ICodeEditor } from 'vs/editor/browser/editorBrowser';
-import { IEditorOpenContext, EditorInputCapabilities, IEditorPaneSelection, EditorPaneSelectionCompareResult, EditorPaneSelectionChangeReason, IEditorPaneWithSelection, IEditorPaneSelectionChangeEvent } from 'vs/workbench/common/editor';
+import { IEditorOpenContext, IEditorPaneSelection, EditorPaneSelectionCompareResult, EditorPaneSelectionChangeReason, IEditorPaneWithSelection, IEditorPaneSelectionChangeEvent } from 'vs/workbench/common/editor';
 import { EditorInput } from 'vs/workbench/common/editor/editorInput';
 import { computeEditorAriaLabel } from 'vs/workbench/browser/editor';
 import { AbstractEditorWithViewState } from 'vs/workbench/browser/parts/editor/editorWithViewState';
@@ -22,16 +22,25 @@ import { ITelemetryService } from 'vs/platform/telemetry/common/telemetry';
 import { IThemeService } from 'vs/platform/theme/common/themeService';
 import { ITextResourceConfigurationChangeEvent, ITextResourceConfigurationService } from 'vs/editor/common/services/textResourceConfiguration';
 import { IEditorOptions as ICodeEditorOptions } from 'vs/editor/common/config/editorOptions';
-import { IEditorGroupsService, IEditorGroup } from 'vs/workbench/services/editor/common/editorGroupsService';
+import { IEditorGroup, IEditorGroupsService } from 'vs/workbench/services/editor/common/editorGroupsService';
 import { CancellationToken } from 'vs/base/common/cancellation';
 import { IEditorService } from 'vs/workbench/services/editor/common/editorService';
 import { IEditorOptions, ITextEditorOptions, TextEditorSelectionRevealType, TextEditorSelectionSource } from 'vs/platform/editor/common/editor';
 import { ICursorPositionChangedEvent } from 'vs/editor/common/cursorEvents';
 import { IFileService } from 'vs/platform/files/common/files';
+import { IMarkdownString } from 'vs/base/common/htmlContent';
 
 export interface IEditorConfiguration {
 	editor: object;
 	diffEditor: object;
+	accessibility?: {
+		verbosity?: {
+			diffEditor?: boolean;
+		};
+	};
+	problems?: {
+		visibility?: boolean;
+	};
 }
 
 /**
@@ -53,6 +62,7 @@ export abstract class AbstractTextEditor<T extends IEditorViewState> extends Abs
 
 	constructor(
 		id: string,
+		group: IEditorGroup,
 		@ITelemetryService telemetryService: ITelemetryService,
 		@IInstantiationService instantiationService: IInstantiationService,
 		@IStorageService storageService: IStorageService,
@@ -62,7 +72,7 @@ export abstract class AbstractTextEditor<T extends IEditorViewState> extends Abs
 		@IEditorGroupsService editorGroupService: IEditorGroupsService,
 		@IFileService protected readonly fileService: IFileService
 	) {
-		super(id, AbstractTextEditor.VIEW_STATE_PREFERENCE_KEY, telemetryService, instantiationService, storageService, textResourceConfigurationService, themeService, editorService, editorGroupService);
+		super(id, group, AbstractTextEditor.VIEW_STATE_PREFERENCE_KEY, telemetryService, instantiationService, storageService, textResourceConfigurationService, themeService, editorService, editorGroupService);
 
 		// Listen to configuration changes
 		this._register(this.textResourceConfigurationService.onDidChangeConfiguration(e => this.handleConfigurationChangeEvent(e)));
@@ -96,7 +106,7 @@ export abstract class AbstractTextEditor<T extends IEditorViewState> extends Abs
 	}
 
 	protected shouldHandleConfigurationChangeEvent(e: ITextResourceConfigurationChangeEvent, resource: URI | undefined): boolean {
-		return e.affectsConfiguration(resource, 'editor');
+		return e.affectsConfiguration(resource, 'editor') || e.affectsConfiguration(resource, 'problems.visibility');
 	}
 
 	private consumePendingConfigurationChangeEvent(): void {
@@ -110,7 +120,7 @@ export abstract class AbstractTextEditor<T extends IEditorViewState> extends Abs
 
 		// Specific editor options always overwrite user configuration
 		const editorConfiguration: ICodeEditorOptions = isObject(configuration.editor) ? deepClone(configuration.editor) : Object.create(null);
-		Object.assign(editorConfiguration, this.getConfigurationOverrides());
+		Object.assign(editorConfiguration, this.getConfigurationOverrides(configuration));
 
 		// ARIA label
 		editorConfiguration.ariaLabel = this.computeAriaLabel();
@@ -118,8 +128,8 @@ export abstract class AbstractTextEditor<T extends IEditorViewState> extends Abs
 		return editorConfiguration;
 	}
 
-	private computeAriaLabel(): string {
-		return this._input ? computeEditorAriaLabel(this._input, undefined, this.group, this.editorGroupService.count) : localize('editor', "Editor");
+	protected computeAriaLabel(): string {
+		return this.input ? computeEditorAriaLabel(this.input, undefined, this.group, this.editorGroupService.count) : localize('editor', "Editor");
 	}
 
 	private onDidChangeFileSystemProvider(scheme: string): void {
@@ -139,19 +149,23 @@ export abstract class AbstractTextEditor<T extends IEditorViewState> extends Abs
 	}
 
 	protected updateReadonly(input: EditorInput): void {
-		const readOnly = input.hasCapability(EditorInputCapabilities.Readonly);
-		this.updateEditorControlOptions({ readOnly });
+		this.updateEditorControlOptions({ ...this.getReadonlyConfiguration(input.isReadonly()) });
 	}
 
-	protected getConfigurationOverrides(): ICodeEditorOptions {
-		const readOnly = this.input?.hasCapability(EditorInputCapabilities.Readonly);
+	protected getReadonlyConfiguration(isReadonly: boolean | IMarkdownString | undefined): { readOnly: boolean; readOnlyMessage: IMarkdownString | undefined } {
+		return {
+			readOnly: !!isReadonly,
+			readOnlyMessage: typeof isReadonly !== 'boolean' ? isReadonly : undefined
+		};
+	}
 
+	protected getConfigurationOverrides(configuration: IEditorConfiguration): ICodeEditorOptions {
 		return {
 			overviewRulerLanes: 3,
 			lineNumbersMinChars: 3,
 			fixedOverflowWidgets: true,
-			readOnly,
-			renderValidationDecorations: 'on' // render problems even in readonly editors (https://github.com/microsoft/vscode/issues/89057)
+			...this.getReadonlyConfiguration(this.input?.isReadonly()),
+			renderValidationDecorations: configuration.problems?.visibility !== false ? 'on' : 'off'
 		};
 	}
 
@@ -242,12 +256,12 @@ export abstract class AbstractTextEditor<T extends IEditorViewState> extends Abs
 		super.clearInput();
 	}
 
-	protected override setEditorVisible(visible: boolean, group: IEditorGroup | undefined): void {
+	protected override setEditorVisible(visible: boolean): void {
 		if (visible) {
 			this.consumePendingConfigurationChangeEvent();
 		}
 
-		super.setEditorVisible(visible, group);
+		super.setEditorVisible(visible);
 	}
 
 	protected override toEditorViewStateResource(input: EditorInput): URI | undefined {

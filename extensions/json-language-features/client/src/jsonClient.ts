@@ -6,7 +6,7 @@
 export type JSONLanguageStatus = { schemas: string[] };
 
 import {
-	workspace, window, languages, commands, ExtensionContext, extensions, Uri, ColorInformation,
+	workspace, window, languages, commands, OutputChannel, ExtensionContext, extensions, Uri, ColorInformation,
 	Diagnostic, StatusBarAlignment, TextEditor, TextDocument, FormattingOptions, CancellationToken, FoldingRange,
 	ProviderResult, TextEdit, Range, Position, Disposable, CompletionItem, CompletionList, CompletionContext, Hover, MarkdownString, FoldingContext, DocumentSymbol, SymbolInformation, l10n
 } from 'vscode';
@@ -19,6 +19,7 @@ import {
 
 import { hash } from './utils/hash';
 import { createDocumentSymbolsLimitItem, createLanguageStatusItem, createLimitStatusItem } from './languageStatus';
+import { getLanguageParticipants, LanguageParticipants } from './languageParticipants';
 
 namespace VSCodeContentRequest {
 	export const type: RequestType<string, string, any> = new RequestType('vscode/content');
@@ -45,13 +46,20 @@ interface DocumentSortingParams {
 	 */
 	readonly uri: string;
 	/**
-	 * The format options
+	 * The sort options
 	 */
 	readonly options: SortOptions;
 }
 
 namespace DocumentSortingRequest {
-	export const type: RequestType<DocumentSortingParams, TextEdit[], any> = new RequestType('json/sort');
+	export interface ITextEdit {
+		range: {
+			start: { line: number; character: number };
+			end: { line: number; character: number };
+		};
+		newText: string;
+	}
+	export const type: RequestType<DocumentSortingParams, ITextEdit[], any> = new RequestType('json/sort');
 }
 
 export interface ISchemaAssociations {
@@ -119,6 +127,9 @@ export type LanguageClientConstructor = (name: string, description: string, clie
 export interface Runtime {
 	schemaRequests: SchemaRequestService;
 	telemetry?: TelemetryReporter;
+	readonly timer: {
+		setTimeout(callback: (...args: any[]) => void, ms: number, ...args: any[]): Disposable;
+	};
 }
 
 export interface SchemaRequestService {
@@ -134,13 +145,51 @@ let jsoncFoldingLimit = 5000;
 let jsonColorDecoratorLimit = 5000;
 let jsoncColorDecoratorLimit = 5000;
 
-export async function startClient(context: ExtensionContext, newLanguageClient: LanguageClientConstructor, runtime: Runtime): Promise<BaseLanguageClient> {
+export interface AsyncDisposable {
+	dispose(): Promise<void>;
+}
 
-	const toDispose = context.subscriptions;
+export async function startClient(context: ExtensionContext, newLanguageClient: LanguageClientConstructor, runtime: Runtime): Promise<AsyncDisposable> {
+	const outputChannel = window.createOutputChannel(languageServerDescription);
+
+	const languageParticipants = getLanguageParticipants();
+	context.subscriptions.push(languageParticipants);
+
+	let client: Disposable | undefined = await startClientWithParticipants(context, languageParticipants, newLanguageClient, outputChannel, runtime);
+
+	let restartTrigger: Disposable | undefined;
+	languageParticipants.onDidChange(() => {
+		if (restartTrigger) {
+			restartTrigger.dispose();
+		}
+		restartTrigger = runtime.timer.setTimeout(async () => {
+			if (client) {
+				outputChannel.appendLine('Extensions have changed, restarting JSON server...');
+				outputChannel.appendLine('');
+				const oldClient = client;
+				client = undefined;
+				await oldClient.dispose();
+				client = await startClientWithParticipants(context, languageParticipants, newLanguageClient, outputChannel, runtime);
+			}
+		}, 2000);
+	});
+
+	return {
+		dispose: async () => {
+			restartTrigger?.dispose();
+			await client?.dispose();
+			outputChannel.dispose();
+		}
+	};
+}
+
+async function startClientWithParticipants(context: ExtensionContext, languageParticipants: LanguageParticipants, newLanguageClient: LanguageClientConstructor, outputChannel: OutputChannel, runtime: Runtime): Promise<AsyncDisposable> {
+
+	const toDispose: Disposable[] = [];
 
 	let rangeFormatting: Disposable | undefined = undefined;
 
-	const documentSelector = ['json', 'jsonc'];
+	const documentSelector = languageParticipants.documentSelector;
 
 	const schemaResolutionErrorStatusBarItem = window.createStatusBarItem('status.json.resolveError', StatusBarAlignment.Right, 0);
 	schemaResolutionErrorStatusBarItem.name = l10n.t('JSON: Schema Resolution Error');
@@ -163,25 +212,14 @@ export async function startClient(context: ExtensionContext, newLanguageClient: 
 		window.showInformationMessage(l10n.t('JSON schema cache cleared.'));
 	}));
 
+
 	toDispose.push(commands.registerCommand('json.sort', async () => {
 
 		if (isClientReady) {
 			const textEditor = window.activeTextEditor;
 			if (textEditor) {
-				const document = textEditor.document;
-				const filesConfig = workspace.getConfiguration('files', document);
-				const options: SortOptions = {
-					tabSize: textEditor.options.tabSize ? Number(textEditor.options.tabSize) : 4,
-					insertSpaces: textEditor.options.insertSpaces ? Boolean(textEditor.options.insertSpaces) : true,
-					trimTrailingWhitespace: filesConfig.get<boolean>('trimTrailingWhitespace'),
-					trimFinalNewlines: filesConfig.get<boolean>('trimFinalNewlines'),
-					insertFinalNewline: filesConfig.get<boolean>('insertFinalNewline'),
-				};
-				const params: DocumentSortingParams = {
-					uri: document.uri.toString(),
-					options
-				};
-				const textEdits = await client.sendRequest(DocumentSortingRequest.type, params);
+				const documentOptions = textEditor.options;
+				const textEdits = await getSortTextEdits(textEditor.document, documentOptions.tabSize, documentOptions.insertSpaces);
 				const success = await textEditor.edit(mutator => {
 					for (const edit of textEdits) {
 						mutator.replace(client.protocol2CodeConverter.asRange(edit.range), edit.newText);
@@ -310,6 +348,7 @@ export async function startClient(context: ExtensionContext, newLanguageClient: 
 		}
 	};
 
+	clientOptions.outputChannel = outputChannel;
 	// Create the language client and start the client.
 	const client = newLanguageClient('json', languageServerDescription, clientOptions);
 	client.registerProposedFeatures();
@@ -471,7 +510,36 @@ export async function startClient(context: ExtensionContext, newLanguageClient: 
 		}
 	}
 
-	return client;
+	async function getSortTextEdits(document: TextDocument, tabSize: string | number = 4, insertSpaces: string | boolean = true): Promise<TextEdit[]> {
+		const filesConfig = workspace.getConfiguration('files', document);
+		const options: SortOptions = {
+			tabSize: Number(tabSize),
+			insertSpaces: Boolean(insertSpaces),
+			trimTrailingWhitespace: filesConfig.get<boolean>('trimTrailingWhitespace'),
+			trimFinalNewlines: filesConfig.get<boolean>('trimFinalNewlines'),
+			insertFinalNewline: filesConfig.get<boolean>('insertFinalNewline'),
+		};
+		const params: DocumentSortingParams = {
+			uri: document.uri.toString(),
+			options
+		};
+		const edits = await client.sendRequest(DocumentSortingRequest.type, params);
+		// Here we convert the JSON objects to real TextEdit objects
+		return edits.map((edit) => {
+			return new TextEdit(
+				new Range(edit.range.start.line, edit.range.start.character, edit.range.end.line, edit.range.end.character),
+				edit.newText
+			);
+		});
+	}
+
+	return {
+		dispose: async () => {
+			await client.stop();
+			toDispose.forEach(d => d.dispose());
+			rangeFormatting?.dispose();
+		}
+	};
 }
 
 function getSchemaAssociations(_context: ExtensionContext): ISchemaAssociation[] {
@@ -545,40 +613,58 @@ function getSettings(): Settings {
 		}
 	};
 
-	const collectSchemaSettings = (schemaSettings: JSONSchemaSettings[], folderUri?: Uri) => {
-		for (const setting of schemaSettings) {
-			const url = getSchemaId(setting, folderUri);
-			if (url) {
-				const schemaSetting: JSONSchemaSettings = { url, fileMatch: setting.fileMatch, folderUri: folderUri?.toString(false), schema: setting.schema };
-				schemas.push(schemaSetting);
+	/*
+	 * Add schemas from the settings
+	 * folderUri to which folder the setting is scoped to. `undefined` means global (also external files)
+	 * settingsLocation against which path relative schema URLs are resolved
+	 */
+	const collectSchemaSettings = (schemaSettings: JSONSchemaSettings[] | undefined, folderUri: string | undefined, settingsLocation: Uri | undefined) => {
+		if (schemaSettings) {
+			for (const setting of schemaSettings) {
+				const url = getSchemaId(setting, settingsLocation);
+				if (url) {
+					const schemaSetting: JSONSchemaSettings = { url, fileMatch: setting.fileMatch, folderUri, schema: setting.schema };
+					schemas.push(schemaSetting);
+				}
 			}
 		}
 	};
 
-	const globalSettings = workspace.getConfiguration('json', null).get<JSONSchemaSettings[]>('schemas');
-	if (Array.isArray(globalSettings)) {
-		collectSchemaSettings(globalSettings);
-	}
-	const folders = workspace.workspaceFolders;
-	if (folders) {
-		for (const folder of folders) {
-			const schemaConfigInfo = workspace.getConfiguration('json', folder.uri).inspect<JSONSchemaSettings[]>('schemas');
-			if (schemaConfigInfo && Array.isArray(schemaConfigInfo.workspaceFolderValue)) {
-				collectSchemaSettings(schemaConfigInfo.workspaceFolderValue, folder.uri);
+	const folders = workspace.workspaceFolders ?? [];
+
+	const schemaConfigInfo = workspace.getConfiguration('json', null).inspect<JSONSchemaSettings[]>('schemas');
+	if (schemaConfigInfo) {
+		// settings in user config
+		collectSchemaSettings(schemaConfigInfo.globalValue, undefined, undefined);
+		if (workspace.workspaceFile) {
+			if (schemaConfigInfo.workspaceValue) {
+				const settingsLocation = Uri.joinPath(workspace.workspaceFile, '..');
+				// settings in the workspace configuration file apply to all files (also external files)
+				collectSchemaSettings(schemaConfigInfo.workspaceValue, undefined, settingsLocation);
+			}
+			for (const folder of folders) {
+				const folderUri = folder.uri;
+				const folderSchemaConfigInfo = workspace.getConfiguration('json', folderUri).inspect<JSONSchemaSettings[]>('schemas');
+				collectSchemaSettings(folderSchemaConfigInfo?.workspaceFolderValue, folderUri.toString(false), folderUri);
+			}
+		} else {
+			if (schemaConfigInfo.workspaceValue && folders.length === 1) {
+				// single folder workspace: settings apply to all files (also external files)
+				collectSchemaSettings(schemaConfigInfo.workspaceValue, undefined, folders[0].uri);
 			}
 		}
 	}
 	return settings;
 }
 
-function getSchemaId(schema: JSONSchemaSettings, folderUri?: Uri): string | undefined {
+function getSchemaId(schema: JSONSchemaSettings, settingsLocation?: Uri): string | undefined {
 	let url = schema.url;
 	if (!url) {
 		if (schema.schema) {
 			url = schema.schema.id || `vscode://schemas/custom/${encodeURIComponent(hash(schema.schema).toString(16))}`;
 		}
-	} else if (folderUri && (url[0] === '.' || url[0] === '/')) {
-		url = Uri.joinPath(folderUri, url).toString(false);
+	} else if (settingsLocation && (url[0] === '.' || url[0] === '/')) {
+		url = Uri.joinPath(settingsLocation, url).toString(false);
 	}
 	return url;
 }

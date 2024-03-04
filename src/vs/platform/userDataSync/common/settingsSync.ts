@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { VSBuffer } from 'vs/base/common/buffer';
 import { CancellationToken } from 'vs/base/common/cancellation';
 import { Event } from 'vs/base/common/event';
 import { URI } from 'vs/base/common/uri';
@@ -15,11 +16,10 @@ import { FileOperationError, FileOperationResult, IFileService } from 'vs/platfo
 import { IStorageService } from 'vs/platform/storage/common/storage';
 import { ITelemetryService } from 'vs/platform/telemetry/common/telemetry';
 import { IUriIdentityService } from 'vs/platform/uriIdentity/common/uriIdentity';
-import { IUserDataProfile } from 'vs/platform/userDataProfile/common/userDataProfile';
-import { AbstractJsonFileSynchroniser, IAcceptResult, IFileResourcePreview, IMergeResult } from 'vs/platform/userDataSync/common/abstractSynchronizer';
-import { edit } from 'vs/platform/userDataSync/common/content';
+import { IUserDataProfile, IUserDataProfilesService } from 'vs/platform/userDataProfile/common/userDataProfile';
+import { AbstractInitializer, AbstractJsonFileSynchroniser, IAcceptResult, IFileResourcePreview, IMergeResult } from 'vs/platform/userDataSync/common/abstractSynchronizer';
 import { getIgnoredSettings, isEmpty, merge, updateIgnoredSettings } from 'vs/platform/userDataSync/common/settingsMerge';
-import { Change, CONFIGURATION_SYNC_STORE_KEY, IRemoteUserData, IUserDataSyncBackupStoreService, IUserDataSyncConfiguration, IUserDataSynchroniser, IUserDataSyncLogService, IUserDataSyncEnablementService, IUserDataSyncStoreService, IUserDataSyncUtilService, SyncResource, UserDataSyncError, UserDataSyncErrorCode, USER_DATA_SYNC_CONFIGURATION_SCOPE, USER_DATA_SYNC_SCHEME, IUserDataResourceManifest } from 'vs/platform/userDataSync/common/userDataSync';
+import { Change, IRemoteUserData, IUserDataSyncLocalStoreService, IUserDataSyncConfiguration, IUserDataSynchroniser, IUserDataSyncLogService, IUserDataSyncEnablementService, IUserDataSyncStoreService, IUserDataSyncUtilService, SyncResource, UserDataSyncError, UserDataSyncErrorCode, USER_DATA_SYNC_CONFIGURATION_SCOPE, USER_DATA_SYNC_SCHEME, IUserDataResourceManifest } from 'vs/platform/userDataSync/common/userDataSync';
 
 interface ISettingsResourcePreview extends IFileResourcePreview {
 	previewResult: IMergeResult;
@@ -57,7 +57,7 @@ export class SettingsSynchroniser extends AbstractJsonFileSynchroniser implement
 		@IEnvironmentService environmentService: IEnvironmentService,
 		@IStorageService storageService: IStorageService,
 		@IUserDataSyncStoreService userDataSyncStoreService: IUserDataSyncStoreService,
-		@IUserDataSyncBackupStoreService userDataSyncBackupStoreService: IUserDataSyncBackupStoreService,
+		@IUserDataSyncLocalStoreService userDataSyncLocalStoreService: IUserDataSyncLocalStoreService,
 		@IUserDataSyncLogService logService: IUserDataSyncLogService,
 		@IUserDataSyncUtilService userDataSyncUtilService: IUserDataSyncUtilService,
 		@IConfigurationService configurationService: IConfigurationService,
@@ -66,7 +66,7 @@ export class SettingsSynchroniser extends AbstractJsonFileSynchroniser implement
 		@IExtensionManagementService private readonly extensionManagementService: IExtensionManagementService,
 		@IUriIdentityService uriIdentityService: IUriIdentityService,
 	) {
-		super(profile.settingsResource, { syncResource: SyncResource.Settings, profile }, collection, fileService, environmentService, storageService, userDataSyncStoreService, userDataSyncBackupStoreService, userDataSyncEnablementService, telemetryService, logService, userDataSyncUtilService, configurationService, uriIdentityService);
+		super(profile.settingsResource, { syncResource: SyncResource.Settings, profile }, collection, fileService, environmentService, storageService, userDataSyncStoreService, userDataSyncLocalStoreService, userDataSyncEnablementService, telemetryService, logService, userDataSyncUtilService, configurationService, uriIdentityService);
 	}
 
 	async getRemoteUserDataSyncConfiguration(manifest: IUserDataResourceManifest | null): Promise<IUserDataSyncConfiguration> {
@@ -266,9 +266,7 @@ export class SettingsSynchroniser extends AbstractJsonFileSynchroniser implement
 		try {
 			const localFileContent = await this.getLocalFileContent();
 			if (localFileContent) {
-				const formatUtils = await this.getFormattingOptions();
-				const content = edit(localFileContent.value.toString(), [CONFIGURATION_SYNC_STORE_KEY], undefined, formatUtils);
-				return !isEmpty(content);
+				return !isEmpty(localFileContent.value.toString());
 			}
 		} catch (error) {
 			if ((<FileOperationError>error).fileOperationResult !== FileOperationResult.FILE_NOT_FOUND) {
@@ -321,12 +319,12 @@ export class SettingsSynchroniser extends AbstractJsonFileSynchroniser implement
 	private async getIgnoredSettings(content?: string): Promise<string[]> {
 		if (!this._defaultIgnoredSettings) {
 			this._defaultIgnoredSettings = this.userDataSyncUtilService.resolveDefaultIgnoredSettings();
-			const disposable = Event.any<any>(
+			const disposable = this._register(Event.any<any>(
 				Event.filter(this.extensionManagementService.onDidInstallExtensions, (e => e.some(({ local }) => !!local))),
 				Event.filter(this.extensionManagementService.onDidUninstallExtension, (e => !e.error)))(() => {
 					disposable.dispose();
 					this._defaultIgnoredSettings = undefined;
-				});
+				}));
 		}
 		const defaultIgnoredSettings = await this._defaultIgnoredSettings;
 		return getIgnoredSettings(defaultIgnoredSettings, this.configurationService, content);
@@ -336,6 +334,57 @@ export class SettingsSynchroniser extends AbstractJsonFileSynchroniser implement
 		if (this.hasErrors(content, false)) {
 			throw new UserDataSyncError(localize('errorInvalidSettings', "Unable to sync settings as there are errors/warning in settings file."), UserDataSyncErrorCode.LocalInvalidContent, this.resource);
 		}
+	}
+
+}
+
+export class SettingsInitializer extends AbstractInitializer {
+
+	constructor(
+		@IFileService fileService: IFileService,
+		@IUserDataProfilesService userDataProfilesService: IUserDataProfilesService,
+		@IEnvironmentService environmentService: IEnvironmentService,
+		@IUserDataSyncLogService logService: IUserDataSyncLogService,
+		@IStorageService storageService: IStorageService,
+		@IUriIdentityService uriIdentityService: IUriIdentityService,
+	) {
+		super(SyncResource.Settings, userDataProfilesService, environmentService, logService, fileService, storageService, uriIdentityService);
+	}
+
+	protected async doInitialize(remoteUserData: IRemoteUserData): Promise<void> {
+		const settingsSyncContent = remoteUserData.syncData ? this.parseSettingsSyncContent(remoteUserData.syncData.content) : null;
+		if (!settingsSyncContent) {
+			this.logService.info('Skipping initializing settings because remote settings does not exist.');
+			return;
+		}
+
+		const isEmpty = await this.isEmpty();
+		if (!isEmpty) {
+			this.logService.info('Skipping initializing settings because local settings exist.');
+			return;
+		}
+
+		await this.fileService.writeFile(this.userDataProfilesService.defaultProfile.settingsResource, VSBuffer.fromString(settingsSyncContent.settings));
+
+		await this.updateLastSyncUserData(remoteUserData);
+	}
+
+	private async isEmpty(): Promise<boolean> {
+		try {
+			const fileContent = await this.fileService.readFile(this.userDataProfilesService.defaultProfile.settingsResource);
+			return isEmpty(fileContent.value.toString().trim());
+		} catch (error) {
+			return (<FileOperationError>error).fileOperationResult === FileOperationResult.FILE_NOT_FOUND;
+		}
+	}
+
+	private parseSettingsSyncContent(syncContent: string): ISettingsSyncContent | null {
+		try {
+			return parseSettingsSyncContent(syncContent);
+		} catch (e) {
+			this.logService.error(e);
+		}
+		return null;
 	}
 
 }

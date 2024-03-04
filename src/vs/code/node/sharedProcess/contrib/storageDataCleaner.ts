@@ -13,11 +13,9 @@ import { ILogService } from 'vs/platform/log/common/log';
 import { StorageClient } from 'vs/platform/storage/common/storageIpc';
 import { EXTENSION_DEVELOPMENT_EMPTY_WINDOW_WORKSPACE } from 'vs/platform/workspace/common/workspace';
 import { NON_EMPTY_WORKSPACE_ID_LENGTH } from 'vs/platform/workspaces/node/workspaces';
-
-/* eslint-disable local/code-layering, local/code-import-patterns */
-// TODO@bpasero layer is not allowed in utility process
-import { IMainProcessService } from 'vs/platform/ipc/electron-sandbox/services';
-import { INativeHostService } from 'vs/platform/native/electron-sandbox/native';
+import { INativeHostService } from 'vs/platform/native/common/native';
+import { IMainProcessService } from 'vs/platform/ipc/common/mainProcessService';
+import { Schemas } from 'vs/base/common/network';
 
 export class UnusedWorkspaceStorageDataCleaner extends Disposable {
 
@@ -39,11 +37,12 @@ export class UnusedWorkspaceStorageDataCleaner extends Disposable {
 		this.logService.trace('[storage cleanup]: Starting to clean up workspace storage folders for unused empty workspaces.');
 
 		try {
-			const workspaceStorageFolders = await Promises.readdir(this.environmentService.workspaceStorageHome.fsPath);
+			const workspaceStorageHome = this.environmentService.workspaceStorageHome.with({ scheme: Schemas.file }).fsPath;
+			const workspaceStorageFolders = await Promises.readdir(workspaceStorageHome);
 			const storageClient = new StorageClient(this.mainProcessService.getChannel('storage'));
 
 			await Promise.all(workspaceStorageFolders.map(async workspaceStorageFolder => {
-				const workspaceStoragePath = join(this.environmentService.workspaceStorageHome.fsPath, workspaceStorageFolder);
+				const workspaceStoragePath = join(workspaceStorageHome, workspaceStorageFolder);
 
 				if (workspaceStorageFolder.length === NON_EMPTY_WORKSPACE_ID_LENGTH) {
 					return; // keep workspace storage for folders/workspaces that can be accessed still
@@ -53,7 +52,7 @@ export class UnusedWorkspaceStorageDataCleaner extends Disposable {
 					return; // keep workspace storage for empty extension development workspaces
 				}
 
-				const windows = await this.nativeHostService.getWindows();
+				const windows = await this.nativeHostService.getWindows({ includeAuxiliaryWindows: false });
 				if (windows.some(window => window.workspace?.id === workspaceStorageFolder)) {
 					return; // keep workspace storage for empty workspaces opened as window
 				}
