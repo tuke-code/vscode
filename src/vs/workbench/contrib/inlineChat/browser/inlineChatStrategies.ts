@@ -30,7 +30,7 @@ import { SaveReason } from 'vs/workbench/common/editor';
 import { countWords } from 'vs/workbench/contrib/chat/common/chatWordCounter';
 import { InlineChatFileCreatePreviewWidget } from 'vs/workbench/contrib/inlineChat/browser/inlineChatFileCreationWidget';
 import { HunkInformation, ReplyResponse, Session } from 'vs/workbench/contrib/inlineChat/browser/inlineChatSession';
-import { InlineChatZoneWidget } from 'vs/workbench/contrib/inlineChat/browser/inlineChatWidget';
+import { InlineChatZoneWidget } from './inlineChatZoneWidget';
 import { CTX_INLINE_CHAT_CHANGE_HAS_DIFF, CTX_INLINE_CHAT_CHANGE_SHOWS_DIFF, CTX_INLINE_CHAT_DOCUMENT_CHANGED, InlineChatConfigKeys, overviewRulerInlineChatDiffInserted } from 'vs/workbench/contrib/inlineChat/common/inlineChat';
 import { HunkState } from './inlineChatSession';
 import { assertType } from 'vs/base/common/types';
@@ -140,6 +140,7 @@ export abstract class EditModeStrategy {
 export class PreviewStrategy extends EditModeStrategy {
 
 	private readonly _ctxDocumentChanged: IContextKey<boolean>;
+	private readonly _previewZone: Lazy<InlineChatFileCreatePreviewWidget>;
 
 	constructor(
 		session: Session,
@@ -147,6 +148,7 @@ export class PreviewStrategy extends EditModeStrategy {
 		zone: InlineChatZoneWidget,
 		@IModelService modelService: IModelService,
 		@IContextKeyService contextKeyService: IContextKeyService,
+		@IInstantiationService instaService: IInstantiationService,
 	) {
 		super(session, editor, zone);
 
@@ -158,10 +160,13 @@ export class PreviewStrategy extends EditModeStrategy {
 				this._ctxDocumentChanged.set(session.hasChangedText);
 			}
 		}, undefined, this._store);
+
+		this._previewZone = new Lazy(() => instaService.createInstance(InlineChatFileCreatePreviewWidget, editor));
 	}
 
 	override dispose(): void {
 		this._ctxDocumentChanged.reset();
+		this._previewZone.rawValue?.dispose();
 		super.dispose();
 	}
 
@@ -213,10 +218,10 @@ export class PreviewStrategy extends EditModeStrategy {
 			this._zone.widget.hideEditsPreview();
 		}
 
-		if (response.untitledTextModel) {
-			this._zone.widget.showCreatePreview(response.untitledTextModel);
+		if (response.untitledTextModel && !response.untitledTextModel.isDisposed()) {
+			this._previewZone.value.showCreation(this._session.wholeRange.value.getStartPosition().delta(-1), response.untitledTextModel);
 		} else {
-			this._zone.widget.hideCreatePreview();
+			this._previewZone.rawValue?.hide();
 		}
 	}
 
