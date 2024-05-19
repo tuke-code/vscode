@@ -35,12 +35,12 @@ import { IModelService } from 'vs/editor/common/services/model';
 import { performAsyncTextEdit, asProgressiveEdit } from './utils';
 import { IAccessibilityService } from 'vs/platform/accessibility/common/accessibility';
 import { IConfigurationService } from 'vs/platform/configuration/common/configuration';
-import { TextEdit } from 'vs/editor/common/languages';
-import { isEqual } from 'vs/base/common/resources';
-import { ITextModelService } from 'vs/editor/common/services/resolverService';
 import { ITextFileService } from 'vs/workbench/services/textfile/common/textfiles';
 import { IUntitledTextEditorModel } from 'vs/workbench/services/untitled/common/untitledTextEditorModel';
 import { Schemas } from 'vs/base/common/network';
+import { IInstantiationService } from 'vs/platform/instantiation/common/instantiation';
+import { DefaultChatTextEditor } from 'vs/workbench/contrib/chat/browser/codeBlockPart';
+import { isEqual } from 'vs/base/common/resources';
 
 export interface IEditObserver {
 	start(): void;
@@ -71,8 +71,8 @@ export abstract class EditModeStrategy {
 		protected readonly _session: Session,
 		protected readonly _editor: ICodeEditor,
 		protected readonly _zone: InlineChatZoneWidget,
-		@ITextModelService private readonly _modelService: ITextModelService,
 		@ITextFileService private readonly _textFileService: ITextFileService,
+		@IInstantiationService private readonly _instaService: IInstantiationService,
 	) { }
 
 	dispose(): void {
@@ -82,6 +82,8 @@ export abstract class EditModeStrategy {
 	protected async _doApplyChanges(ignoreLocal: boolean): Promise<void> {
 
 		const untitledModels: IUntitledTextEditorModel[] = [];
+
+		const editor = this._instaService.createInstance(DefaultChatTextEditor);
 
 
 		for (const request of this._session.chatModel.getRequests()) {
@@ -94,28 +96,11 @@ export abstract class EditModeStrategy {
 				if (item.kind !== 'textEditGroup') {
 					continue;
 				}
-				if (item.state?.applied) {
-					continue;
-				}
 				if (ignoreLocal && isEqual(item.uri, this._session.textModelN.uri)) {
 					continue;
 				}
 
-				const ref = await this._modelService.createModelReference(item.uri);
-				try {
-					ref.object.textEditorModel.pushStackElement();
-					let total = 0;
-					for (const group of item.edits) {
-						const edits = group.map(TextEdit.asEditOperation);
-						ref.object.textEditorModel.pushEditOperations(null, edits, () => null);
-						total += edits.length;
-					}
-					ref.object.textEditorModel.pushStackElement();
-					request.response.setEditApplied(item, total);
-
-				} finally {
-					ref.dispose();
-				}
+				await editor.apply(request.response, item);
 
 				if (item.uri.scheme === Schemas.untitled) {
 					const untitled = this._textFileService.untitled.get(item.uri);
@@ -207,10 +192,10 @@ export class PreviewStrategy extends EditModeStrategy {
 		zone: InlineChatZoneWidget,
 		@IModelService modelService: IModelService,
 		@IContextKeyService contextKeyService: IContextKeyService,
-		@ITextModelService textModelService: ITextModelService,
 		@ITextFileService textFileService: ITextFileService,
+		@IInstantiationService instaService: IInstantiationService
 	) {
-		super(session, editor, zone, textModelService, textFileService);
+		super(session, editor, zone, textFileService, instaService);
 
 		this._ctxDocumentChanged = CTX_INLINE_CHAT_DOCUMENT_CHANGED.bindTo(contextKeyService);
 
@@ -316,10 +301,10 @@ export class LiveStrategy extends EditModeStrategy {
 		@IEditorWorkerService protected readonly _editorWorkerService: IEditorWorkerService,
 		@IAccessibilityService private readonly _accessibilityService: IAccessibilityService,
 		@IConfigurationService private readonly _configService: IConfigurationService,
-		@ITextModelService textModelService: ITextModelService,
 		@ITextFileService textFileService: ITextFileService,
+		@IInstantiationService instaService: IInstantiationService
 	) {
-		super(session, editor, zone, textModelService, textFileService);
+		super(session, editor, zone, textFileService, instaService);
 		this._ctxCurrentChangeHasDiff = CTX_INLINE_CHAT_CHANGE_HAS_DIFF.bindTo(contextKeyService);
 		this._ctxCurrentChangeShowsDiff = CTX_INLINE_CHAT_CHANGE_SHOWS_DIFF.bindTo(contextKeyService);
 
@@ -605,17 +590,17 @@ export class LiveStrategy extends EditModeStrategy {
 			message = localize('change.0', "Nothing changed.");
 		} else if (remaining === 1) {
 			message = needsReview
-				? localize('review.1', "$(info) Accept or Discard 1 change.")
+				? localize('review.1', "$(info) Accept or discard 1 change")
 				: localize('change.1', "1 change");
 		} else {
 			message = needsReview
-				? localize('review.N', "$(info) Accept or Discard {0} changes.", remaining)
+				? localize('review.N', "$(info) Accept or Discard {0} changes", remaining)
 				: localize('change.N', "{0} changes", total);
 		}
 
 		let title: string | undefined;
 		if (needsReview) {
-			title = localize('review', "Review (accept or discard) all changes before continuing.");
+			title = localize('review', "Review (accept or discard) all changes before continuing");
 		}
 
 		this._zone.widget.updateStatus(message, { title });

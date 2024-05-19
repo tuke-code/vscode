@@ -13,7 +13,6 @@ import { Registry } from 'vs/platform/registry/common/platform';
 import { IInstantiationService } from 'vs/platform/instantiation/common/instantiation';
 import { localize } from 'vs/nls';
 import { WorkbenchList } from 'vs/platform/list/browser/listService';
-import { IListAccessibilityProvider } from 'vs/base/browser/ui/list/listWidget';
 import { getExtensionId } from 'vs/platform/extensionManagement/common/extensionManagementUtil';
 import { IListRenderer, IListVirtualDelegate } from 'vs/base/browser/ui/list/list';
 import { Button } from 'vs/base/browser/ui/button/button';
@@ -37,6 +36,7 @@ import { IExtensionService } from 'vs/workbench/services/extensions/common/exten
 import { Codicon } from 'vs/base/common/codicons';
 import { SyncDescriptor } from 'vs/platform/instantiation/common/descriptors';
 import { ResolvedKeybinding } from 'vs/base/common/keybindings';
+import { fromNow } from 'vs/base/common/date';
 
 class RuntimeStatusMarkdownRenderer extends Disposable implements IExtensionFeatureMarkdownRenderer {
 
@@ -45,6 +45,7 @@ class RuntimeStatusMarkdownRenderer extends Disposable implements IExtensionFeat
 
 	constructor(
 		@IExtensionService private readonly extensionService: IExtensionService,
+		@IExtensionFeaturesManagementService private readonly extensionFeaturesManagementService: IExtensionFeaturesManagementService,
 	) {
 		super();
 	}
@@ -66,6 +67,7 @@ class RuntimeStatusMarkdownRenderer extends Disposable implements IExtensionFeat
 				emitter.fire(this.getRuntimeStatusData(manifest));
 			}
 		}));
+		disposables.add(this.extensionFeaturesManagementService.onDidChangeAccessData(e => emitter.fire(this.getRuntimeStatusData(manifest))));
 		return {
 			onDidChange: emitter.event,
 			data: this.getRuntimeStatusData(manifest),
@@ -98,6 +100,29 @@ class RuntimeStatusMarkdownRenderer extends Disposable implements IExtensionFeat
 				data.appendMarkdown(`\n ### ${localize('messaages', "Messages ({0})", status.messages.length)}\n`);
 				for (const message of status.messages) {
 					data.appendMarkdown(`$(${(message.type === Severity.Error ? Codicon.error : message.type === Severity.Warning ? Codicon.warning : Codicon.info).id})&nbsp;${message.message}\n\n`);
+				}
+			}
+		}
+		const features = Registry.as<IExtensionFeaturesRegistry>(Extensions.ExtensionFeaturesRegistry).getExtensionFeatures();
+		for (const feature of features) {
+			const accessData = this.extensionFeaturesManagementService.getAccessData(extensionId, feature.id);
+			if (accessData) {
+				data.appendMarkdown(`\n ### ${feature.label}\n\n`);
+				const status = accessData?.current?.status;
+				if (status) {
+					if (status?.severity === Severity.Error) {
+						data.appendMarkdown(`$(${errorIcon.id}) ${status.message}\n\n`);
+					}
+					if (status?.severity === Severity.Warning) {
+						data.appendMarkdown(`$(${warningIcon.id}) ${status.message}\n\n`);
+					}
+				}
+				if (accessData?.totalCount) {
+					if (accessData.current) {
+						data.appendMarkdown(`${localize('last request', "Last Request: `{0}`", fromNow(accessData.current.lastAccessed, true, true))}\n\n`);
+						data.appendMarkdown(`${localize('requests count session', "Requests (Session) : `{0}`", accessData.current.count)}\n\n`);
+					}
+					data.appendMarkdown(`${localize('requests count total', "Requests (Overall): `{0}`", accessData.totalCount)}\n\n`);
 				}
 			}
 		}
@@ -214,7 +239,7 @@ export class ExtensionFeaturesTab extends Themable {
 			multipleSelectionSupport: false,
 			setRowLineHeight: false,
 			horizontalScrolling: false,
-			accessibilityProvider: <IListAccessibilityProvider<IExtensionFeatureDescriptor | null>>{
+			accessibilityProvider: {
 				getAriaLabel(extensionFeature: IExtensionFeatureDescriptor | null): string {
 					return extensionFeature?.label ?? '';
 				},

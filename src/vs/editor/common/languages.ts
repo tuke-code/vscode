@@ -19,7 +19,7 @@ import { IPosition, Position } from 'vs/editor/common/core/position';
 import { IRange, Range } from 'vs/editor/common/core/range';
 import { Selection } from 'vs/editor/common/core/selection';
 import { LanguageId } from 'vs/editor/common/encodedTokenAttributes';
-import { LanguageFilter } from 'vs/editor/common/languageSelector';
+import { LanguageSelector } from 'vs/editor/common/languageSelector';
 import * as model from 'vs/editor/common/model';
 import { TokenizationRegistry as TokenizationRegistryImpl } from 'vs/editor/common/tokenizationRegistry';
 import { ContiguousMultilineTokens } from 'vs/editor/common/tokens/contiguousMultilineTokens';
@@ -834,6 +834,8 @@ export interface CodeActionProvider {
 
 	displayName?: string;
 
+	extensionId?: string;
+
 	/**
 	 * Provide commands for the given document and range.
 	 */
@@ -1068,7 +1070,7 @@ export interface DocumentHighlightProvider {
  * A provider that can provide document highlights across multiple documents.
  */
 export interface MultiDocumentHighlightProvider {
-	selector: LanguageFilter;
+	readonly selector: LanguageSelector;
 
 	/**
 	 * Provide a Map of URI --> document highlights, like all occurrences of a variable or
@@ -1740,6 +1742,7 @@ export interface NewSymbolName {
 }
 
 export interface NewSymbolNamesProvider {
+	supportsAutomaticNewSymbolNamesTriggerKind?: Promise<boolean | undefined>;
 	provideNewSymbolNames(model: model.ITextModel, range: IRange, triggerKind: NewSymbolNameTriggerKind, token: CancellationToken): ProviderResult<NewSymbolName[]>;
 }
 
@@ -1781,9 +1784,9 @@ export interface CommentThreadTemplate {
 /**
  * @internal
  */
-export interface CommentInfo {
+export interface CommentInfo<T = IRange> {
 	extensionId?: string;
-	threads: CommentThread[];
+	threads: CommentThread<T>[];
 	pendingCommentThreads?: PendingCommentThread[];
 	commentingRanges: CommentingRanges;
 }
@@ -1874,6 +1877,13 @@ export interface CommentThread<T = IRange> {
 	onDidChangeCanReply: Event<boolean>;
 	isDisposed: boolean;
 	isTemplate: boolean;
+}
+
+/**
+ * @internal
+ */
+export interface AddedCommentThread<T = IRange> extends CommentThread<T> {
+	editorId?: string;
 }
 
 /**
@@ -1970,7 +1980,7 @@ export interface CommentThreadChangedEvent<T> {
 	/**
 	 * Added comment threads.
 	 */
-	readonly added: CommentThread<T>[];
+	readonly added: AddedCommentThread<T>[];
 
 	/**
 	 * Removed comment threads.

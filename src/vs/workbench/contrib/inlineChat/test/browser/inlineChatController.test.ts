@@ -29,7 +29,7 @@ import { MockContextKeyService } from 'vs/platform/keybinding/test/common/mockKe
 import { IEditorProgressService, IProgressRunner } from 'vs/platform/progress/common/progress';
 import { IViewDescriptorService } from 'vs/workbench/common/views';
 import { AccessibilityVerbositySettingId } from 'vs/workbench/contrib/accessibility/browser/accessibilityConfiguration';
-import { IAccessibleViewService } from 'vs/workbench/contrib/accessibility/browser/accessibleView';
+import { IAccessibleViewService } from 'vs/platform/accessibility/browser/accessibleView';
 import { IChatAccessibilityService, IChatWidgetService } from 'vs/workbench/contrib/chat/browser/chat';
 import { ChatAgentLocation, ChatAgentService, IChatAgentService } from 'vs/workbench/contrib/chat/common/chatAgents';
 import { IChatResponseViewModel } from 'vs/workbench/contrib/chat/common/chatViewModel';
@@ -58,6 +58,8 @@ import { ChatWidgetHistoryService, IChatWidgetHistoryService } from 'vs/workbenc
 import { IHoverService } from 'vs/platform/hover/browser/hover';
 import { NullHoverService } from 'vs/platform/hover/test/browser/nullHoverService';
 import { ChatVariablesService } from 'vs/workbench/contrib/chat/browser/chatVariables';
+import { ICommandService } from 'vs/platform/commands/common/commands';
+import { TestCommandService } from 'vs/editor/test/browser/editorTestServices';
 
 suite('InteractiveChatController', function () {
 	class TestController extends InlineChatController {
@@ -136,6 +138,7 @@ suite('InteractiveChatController', function () {
 			[IInlineChatService, new SyncDescriptor(InlineChatServiceImpl)],
 			[IDiffProviderFactoryService, new SyncDescriptor(TestDiffProviderFactoryService)],
 			[IInlineChatSessionService, new SyncDescriptor(InlineChatSessionServiceImpl)],
+			[ICommandService, new SyncDescriptor(TestCommandService)],
 			[IInlineChatSavingService, new class extends mock<IInlineChatSavingService>() {
 				override markChanged(session: Session): void {
 					// noop
@@ -180,8 +183,9 @@ suite('InteractiveChatController', function () {
 
 		store.add(chatAgentService.registerDynamicAgent({
 			extensionId: nullExtensionDescription.identifier,
-			extensionPublisher: '',
+			publisherDisplayName: '',
 			extensionDisplayName: '',
+			extensionPublisherId: '',
 			id: 'testAgent',
 			name: 'testAgent',
 			isDefault: true,
