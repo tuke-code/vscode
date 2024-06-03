@@ -62,11 +62,12 @@ class AccessibleViewNextCodeBlockAction extends Action2 {
 				mac: { primary: KeyMod.CtrlCmd | KeyMod.Alt | KeyCode.PageDown, },
 				weight: KeybindingWeight.WorkbenchContrib,
 			},
+			// to 
 			icon: Codicon.arrowRight,
 			menu:
 			{
 				...accessibleViewMenu,
-				when: ContextKeyExpr.and(accessibleViewIsShown, accessibleViewSupportsNavigation),
+				when: ContextKeyExpr.and(accessibleViewIsShown, accessibleViewContainsCodeBlocks),
 			},
 			title: localize('editor.action.accessibleViewNextCodeBlock', "Accessible View: Next Code Block")
 		});
@@ -91,7 +92,7 @@ class AccessibleViewPreviousCodeBlockAction extends Action2 {
 			icon: Codicon.arrowLeft,
 			menu: {
 				...accessibleViewMenu,
-				when: ContextKeyExpr.and(accessibleViewIsShown, accessibleViewSupportsNavigation),
+				when: ContextKeyExpr.and(accessibleViewIsShown, accessibleViewContainsCodeBlocks),
 			},
 			title: localize('editor.action.accessibleViewPreviousCodeBlock', "Accessible View: Previous Code Block")
 		});
@@ -245,6 +246,25 @@ class AccessibilityHelpConfigureKeybindingsAction extends Action2 {
 	}
 }
 registerAction2(AccessibilityHelpConfigureKeybindingsAction);
+
+
+class AccessibilityHelpOpenHelpLinkAction extends Action2 {
+	constructor() {
+		super({
+			id: AccessibilityCommandId.AccessibilityHelpOpenHelpLink,
+			precondition: ContextKeyExpr.and(accessibilityHelpIsShown),
+			keybinding: {
+				primary: KeyMod.Alt | KeyCode.KeyH,
+				weight: KeybindingWeight.WorkbenchContrib
+			},
+			title: localize('editor.action.accessibilityHelpOpenHelpLink', "Accessibility Help Open Help Link")
+		});
+	}
+	run(accessor: ServicesAccessor): void {
+		accessor.get(IAccessibleViewService).openHelpLink();
+	}
+}
+registerAction2(AccessibilityHelpOpenHelpLinkAction);
 
 class AccessibleViewAcceptInlineCompletionAction extends Action2 {
 	constructor() {
