@@ -1429,10 +1429,6 @@ export function createApiFactoryAndRegisterActors(accessor: ServicesAccessor): I
 			createDynamicChatParticipant(id: string, dynamicProps: vscode.DynamicChatParticipantProps, handler: vscode.ChatExtendedRequestHandler): vscode.ChatParticipant {
 				checkProposedApiEnabled(extension, 'chatParticipantPrivate');
 				return extHostChatAgents2.createDynamicChatAgent(extension, id, dynamicProps, handler);
-			},
-			attachContext(name: string, value: string | vscode.Uri | vscode.Location | unknown, location: vscode.ChatLocation.Panel) {
-				checkProposedApiEnabled(extension, 'chatVariableResolver');
-				return extHostChatVariables.attachContext(name, value, location);
 			}
 		};
 
@@ -1451,6 +1447,10 @@ export function createApiFactoryAndRegisterActors(accessor: ServicesAccessor): I
 					return Event.None(listener, thisArgs, disposables);
 				}
 				return extHostLanguageModels.onDidChangeProviders(listener, thisArgs, disposables);
+			},
+			registerChatModelProvider: (id, provider, metadata) => {
+				checkProposedApiEnabled(extension, 'chatProvider');
+				return extHostLanguageModels.registerLanguageModel(extension, id, provider, metadata);
 			},
 			// --- embeddings
 			get embeddingModels() {
@@ -1733,6 +1733,9 @@ export function createApiFactoryAndRegisterActors(accessor: ServicesAccessor): I
 			ChatLocation: extHostTypes.ChatLocation,
 			LanguageModelChatMessageRole: extHostTypes.LanguageModelChatMessageRole,
 			LanguageModelChatMessage: extHostTypes.LanguageModelChatMessage,
+			LanguageModelChatMessageFunctionResultPart: extHostTypes.LanguageModelFunctionResultPart,
+			LanguageModelChatResponseTextPart: extHostTypes.LanguageModelTextPart,
+			LanguageModelChatResponseFunctionUsePart: extHostTypes.LanguageModelFunctionUsePart,
 			LanguageModelChatMessage2: extHostTypes.LanguageModelChatMessage, // TODO@jrieken REMOVE
 			LanguageModelChatSystemMessage: extHostTypes.LanguageModelChatSystemMessage,// TODO@jrieken REMOVE
 			LanguageModelChatUserMessage: extHostTypes.LanguageModelChatUserMessage,// TODO@jrieken REMOVE
